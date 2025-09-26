@@ -126,7 +126,7 @@ Que souhaitez-vous faire ?
 ```
 $ python -m src.cli --path-import "/media/music/new"
 Connexion à Spotify → navigateur ouvert...
-✔ Connecté en tant que liam
+✔ Connecté en tant que Karao Saeki
 
 Que souhaitez-vous faire ?
 [1] Créer une nouvelle playlist
