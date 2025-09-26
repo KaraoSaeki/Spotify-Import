@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Set
@@ -20,6 +21,7 @@ def ensure_playlist_create(
     collaborative: bool,
     description: Optional[str] | None,
 ) -> PlaylistInfo:
+    logger = logging.getLogger("spotify_importer")
     me = sp.me()
     user_id = me["id"]
     payload = {
@@ -28,8 +30,37 @@ def ensure_playlist_create(
         "collaborative": collaborative,
         "description": description or "",
     }
+    logger.debug("Creating playlist with payload: %s", payload)
     pl = sp.user_playlist_create(user=user_id, **payload)
     owner = pl.get("owner", {})
+    logger.info(
+        "Playlist created by API: id=%s public=%s collaborative=%s",
+        pl.get("id"), pl.get("public"), pl.get("collaborative")
+    )
+    # Safeguard: if API returned a different public value than requested, enforce it.
+    try:
+        if isinstance(pl.get("public"), bool) and pl.get("public") != public:
+            logger.warning(
+                "API returned public=%s but requested public=%s. Enforcing change...",
+                pl.get("public"), public,
+            )
+            sp.playlist_change_details(
+                playlist_id=pl["id"],
+                name=name,
+                public=public,
+                collaborative=collaborative,
+                description=description or "",
+            )
+            # Re-fetch minimal details to confirm
+            refreshed = sp.playlist(pl["id"], fields="id,public,collaborative,owner(id,display_name),name,tracks.total")
+            owner = refreshed.get("owner", {}) or owner
+            pl = refreshed
+            logger.info(
+                "Playlist updated post-create: id=%s public=%s collaborative=%s",
+                pl.get("id"), pl.get("public"), pl.get("collaborative")
+            )
+    except Exception as e:
+        logger.exception("Failed to enforce playlist privacy setting: %s", e)
     return PlaylistInfo(
         id=pl["id"],
         name=pl["name"],

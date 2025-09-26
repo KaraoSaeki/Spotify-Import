@@ -82,6 +82,10 @@ def prompt_new_playlist_meta(args) -> dict:
     ans_col = input(f"Collaborative ? (Y/N) [defaut={'Y' if collab else 'N'}]: ").strip().lower()
     if ans_col in {"y", "n"}:
         collab = ans_col == "y"
+    # Règle Spotify: une playlist collaborative ne peut pas être publique
+    if collab and public:
+        console.print("[yellow]Une playlist collaborative ne peut pas être publique. Passage en privée.[/yellow]")
+        public = False
     description = input("Description (optionnel): ").strip() or None
     return {"name": name, "public": public, "collaborative": collab, "description": description}
 
@@ -149,6 +153,9 @@ def main() -> None:
     if action == "create":
         meta = prompt_new_playlist_meta(args)  # name/public/collab/desc
         pl = ensure_playlist_create(sp, **meta)
+        console.print(
+            f"Créée: '{pl.name}' — Public={'Oui' if pl.public else 'Non'} • Collaborative={'Oui' if pl.collaborative else 'Non'}"
+        )
     elif action == "update":
         pls = list_user_playlists(sp)
         pl = safe_select_playlist_interactive(pls)
