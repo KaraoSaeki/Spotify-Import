@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Generator, Iterable, Iterator, List, Sequence
+
+
+def _is_hidden(path: Path) -> bool:
+    name = path.name
+    if name.startswith("."):
+        return True
+    # On Windows, hidden attribute isn't trivial to read without ctypes; best-effort via dotfiles.
+    return False
+
+
+def iter_audio_files(
+    root: Path | str,
+    exts: Sequence[str],
+    follow_symlinks: bool,
+    ignore_hidden: bool,
+) -> Iterator[Path]:
+    """Yield Path des fichiers audio valides, récursivement.
+
+    - root: dossier racine
+    - exts: extensions autorisées, sans point (ex: ["mp3", "flac"]).
+    """
+    root_path = Path(root)
+    allowed = {e.lower().lstrip(".") for e in exts}
+
+    for dirpath, dirnames, filenames in os.walk(root_path, followlinks=follow_symlinks):
+        dpath = Path(dirpath)
+        if ignore_hidden and _is_hidden(dpath):
+            # Skip hidden directories entirely
+            dirnames[:] = []
+            continue
+        # Optionally skip hidden subdirs
+        if ignore_hidden:
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for fn in filenames:
+            p = dpath / fn
+            if ignore_hidden and _is_hidden(p):
+                continue
+            ext = p.suffix.lower().lstrip(".")
+            if ext in allowed:
+                yield p
