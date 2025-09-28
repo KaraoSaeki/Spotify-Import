@@ -67,6 +67,7 @@ Que souhaitez-vous faire ?
 - `--resume` (chemin vers `state.json` pour reprendre un run)
 - `--extensions` (CSV, défaut: `mp3,m4a,aac,flac,ogg,opus,wav,aiff,alac,wma,aif`)
 - `--no-follow-symlinks`, `--ignore-hidden`
+- `--no-recursive` (ne pas descendre dans les sous-dossiers du dossier fourni)
 
 ## Heuristique de matching
 1) Stratégie de requêtes successives:
@@ -94,6 +95,13 @@ Que souhaitez-vous faire ?
 - Rapports:
   - `reports/summary-YYYYmmdd_HHMMSS.csv` (une ligne par fichier)
   - `reports/summary-YYYYmmdd_HHMMSS.json` (NDJSON)
+  - Listes par statut (une par statut) avec les chemins des fichiers locaux concernés:
+    - `reports/ADDED-YYYYmmdd_HHMMSS.txt`
+    - `reports/SKIPPED-YYYYmmdd_HHMMSS.txt`
+    - `reports/NOT_FOUND-YYYYmmdd_HHMMSS.txt`
+    - `reports/AMBIGUOUS-YYYYmmdd_HHMMSS.txt`
+    - `reports/DUPLICATE-YYYYmmdd_HHMMSS.txt`
+    - `reports/PLANNED_ADD-YYYYmmdd_HHMMSS.txt` (mode dry-run)
 - Statuts possibles: `ADDED`, `SKIPPED`, `NOT_FOUND`, `AMBIGUOUS`, `DUPLICATE`, `PLANNED_ADD` (dry-run)
 
 ## Reprise (`--resume`)
@@ -123,6 +131,10 @@ Que souhaitez-vous faire ?
 - Aucun upload de vos fichiers audio vers Spotify.
 
 ## Exemple d’interaction
+### Exemple non-récursif
+```
+python -m src.cli --path-import "D:/Musique/Imports" --no-recursive
+```
 ```
 $ python -m src.cli --path-import "/media/music/new"
 Connexion à Spotify → navigateur ouvert...

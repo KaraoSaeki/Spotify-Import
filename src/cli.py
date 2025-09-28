@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, IO
 
 from rich.console import Console
 from tqdm import tqdm
@@ -24,6 +24,7 @@ from .types import ADDED, AMBIGUOUS, DUPLICATE, NOT_FOUND, PLANNED_ADD, LocalTra
 from .utils import DEFAULT_EXTS
 from .utils import strip_suffixes, remove_feat
 from .scanner import iter_audio_files
+from .advanced import enhance_from_filename_anime
 
 console = Console()
 
@@ -50,6 +51,14 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--no-follow-symlinks", action="store_true")
     p.add_argument("--ignore-hidden", action="store_true")
+    p.add_argument("--no-recursive", action="store_true", help="Ne pas descendre dans les sous-dossiers du dossier fourni")
+    p.add_argument(
+        "--advanced-search",
+        type=str,
+        choices=["anime"],
+        default=None,
+        help="Active une recherche avancée en fonction du nom de fichier (ex: 'anime')",
+    )
     return p.parse_args()
 
 
@@ -122,6 +131,25 @@ def _load_resume(resume_path: Optional[str]) -> Dict[str, dict]:
         try:
             return json.loads(p.read_text(encoding="utf-8"))
         except Exception:
+            # Fallback: try NDJSON (e.g., summary-*.json) and build a processed map from 'path' lines
+            try:
+                processed: Dict[str, dict] = {}
+                with p.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            continue
+                        path = obj.get("path")
+                        if path:
+                            processed[str(path)] = {"uri": obj.get("uri"), "score": obj.get("score")}
+                if processed:
+                    return {"processed": processed}
+            except Exception:
+                pass
             return {"processed": {}}
     return {"processed": {}}
 
@@ -140,6 +168,18 @@ def main() -> None:
 
     logger, log_path = setup_logging()
     csv_path, json_path = init_summaries()
+
+    # Create per-status list files for this run
+    ts = csv_path.stem.replace("summary-", "")
+    reports_dir = csv_path.parent
+    status_names = ["ADDED", "SKIPPED", "NOT_FOUND", "AMBIGUOUS", "DUPLICATE", "PLANNED_ADD"]
+    status_fhs: dict[str, IO[str]] = {}
+    try:
+        for name in status_names:
+            p = reports_dir / f"{name}-{ts}.txt"
+            status_fhs[name] = p.open("a", encoding="utf-8")
+    except Exception:
+        status_fhs = {}
 
     console.print("Connexion à Spotify → navigateur ouvert…")
     sp = get_spotify_client(
@@ -168,15 +208,31 @@ def main() -> None:
     existing = get_playlist_track_uris(sp, pl.id)
     to_add_batch: List[str] = []
 
+    # Load resume state and build a normalized processed set (case-insensitive, resolved paths)
+    def _norm_key(p: Path | str) -> str:
+        try:
+            pp = Path(p).resolve(strict=False)
+        except Exception:
+            pp = Path(str(p))
+        # Normalize to lowercase for Windows case-insensitivity and use as_posix for slashes
+        return pp.as_posix().casefold()
+
     state = _load_resume(args.resume)
-    processed = set(state.get("processed", {}).keys())
+    processed_norm = { _norm_key(k) for k in state.get("processed", {}).keys() }
 
     files = list(
         iter_audio_files(
-            Path(args.path_import), exts=exts, follow_symlinks=follow_symlinks, ignore_hidden=args.ignore_hidden
+            Path(args.path_import), exts=exts, follow_symlinks=follow_symlinks, ignore_hidden=args.ignore_hidden, recursive=not args.no_recursive
         )
     )
     console.print(f"Scan des fichiers…  {len(files)} trouvés")
+    # If resuming, show how many will be skipped
+    try:
+        skipped_already = sum(1 for f in files if _norm_key(f) in processed_norm)
+        if skipped_already:
+            console.print(f"Reprise: {skipped_already} déjà traités seront ignorés")
+    except Exception:
+        pass
     if args.dry_run:
         console.print("[bold yellow]Mode DRY-RUN: aucun ajout ne sera effectué[/bold yellow]")
 
@@ -186,7 +242,8 @@ def main() -> None:
 
     try:
         for path in tqdm(files, desc="Analyse"):
-            if str(path) in processed:
+            key_cur = _norm_key(path)
+            if key_cur in processed_norm:
                 continue
 
             lt = read_tags(path)
@@ -208,6 +265,36 @@ def main() -> None:
             if cands:
                 best_uri = cands[0].uri
                 best_score = cands[0].score
+
+            # Advanced enhancement from filename (e.g., anime OP/ED mapping) if score is low
+            if (
+                args.advanced_search == "anime"
+                and (best_score is None or best_score < max(0.7, float(args.auto_accept) - 0.1))
+            ):
+                try:
+                    improved = enhance_from_filename_anime(path)
+                    if improved and (improved.get("title") or improved.get("artist")):
+                        # Build a transient LocalTrack-like context
+                        lt2 = LocalTrack(
+                            title=improved.get("title") or lt.title,
+                            artist=improved.get("artist") or lt.artist,
+                            album=lt.album,
+                            duration_ms=lt.duration_ms,
+                            year=lt.year,
+                            isrc=lt.isrc,
+                            tracknumber=lt.tracknumber,
+                        )
+                        c2 = search_candidates(sp, lt2, args.market, limit=20)
+                        if c2:
+                            for c in c2:
+                                c.score = score_candidate(lt, c)
+                            c2 = sorted(c2, key=lambda c: c.score, reverse=True)
+                            if not cands or c2[0].score > (best_score or 0):
+                                cands = c2
+                                best_uri = cands[0].uri
+                                best_score = cands[0].score
+                except Exception:
+                    pass
             # If under auto-accept, show interactive
             try:
                 best_uri = decide_with_auto_or_menu(
@@ -218,6 +305,7 @@ def main() -> None:
                     sp=sp,
                     market=args.market,
                     max_candidates=max(1, min(5, int(args.max_candidates))),
+                    local_path=str(path),
                 )
                 if best_uri and cands:
                     for c in cands:
@@ -226,11 +314,18 @@ def main() -> None:
                             break
             except _UserQuit:
                 logger.info("Arrêt demandé par l'utilisateur. Sauvegarde de l'état.")
-                state.setdefault("processed", {})[str(path)] = {"uri": best_uri, "score": best_score}
+                state.setdefault("processed", {})[key_cur] = {"uri": best_uri, "score": best_score}
                 _save_resume(args.resume, state)
                 return
 
             status = decide_status(best_uri, existing, args.dry_run)
+            # Append path to per-status list file (once)
+            try:
+                if status in status_fhs:
+                    status_fhs[status].write(str(path) + "\n")
+            except Exception:
+                pass
+
             if status == ADDED or status == PLANNED_ADD:
                 to_add_batch.append(best_uri)  # type: ignore
                 existing.add(best_uri)  # type: ignore
@@ -248,7 +343,7 @@ def main() -> None:
 
             log_and_append_summary(csv_path, json_path, path, lt, best_uri, status, best_score)
 
-            state.setdefault("processed", {})[str(path)] = {"uri": best_uri, "score": best_score}
+            state.setdefault("processed", {})[key_cur] = {"uri": best_uri, "score": best_score}
             _save_resume(args.resume, state)
 
         if to_add_batch and not args.dry_run:
@@ -263,6 +358,15 @@ def main() -> None:
         console.print(f"Log: {log_path}")
         console.print(f"CSV: {csv_path}")
         console.print(f"JSON: {json_path}")
+        # Close any open status files
+        try:
+            for fh in status_fhs.values():
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

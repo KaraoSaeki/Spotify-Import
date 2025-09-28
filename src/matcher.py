@@ -185,6 +185,7 @@ def decide_with_auto_or_menu(
     sp=None,
     market: Optional[str] = None,
     max_candidates: int = 5,
+    local_path: Optional[str] = None,
 ) -> Optional[str]:
     """Return URI if accepted, else None. If dry_run, still return best URI but caller should avoid adding.
 
@@ -200,9 +201,27 @@ def decide_with_auto_or_menu(
     if not cands:
         return None
 
+    # Show current local track context for clarity
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.table import Table
+
+        console = Console()
+        meta_table = Table.grid()
+        meta_table.add_row("Fichier:", str(local_path) if local_path else "(inconnu)")
+        meta_table.add_row("Titre:", lt.title or "")
+        meta_table.add_row("Artiste:", lt.artist or "")
+        meta_table.add_row("Album:", lt.album or "")
+        if lt.duration_ms:
+            meta_table.add_row("Durée:", format_duration(lt.duration_ms))
+        console.print(Panel(meta_table, title="En cours de traitement", expand=False))
+    except Exception:
+        pass
+
     _print_candidates(cands, max_to_show=max_candidates)
     while True:
-        choice = input("[s]kip, [m]anual, [1-5], [q]uit > ").strip().lower()
+        choice = input("[s]kip, [m]anual, [a]utre (titre/artiste), [1-5], [q]uit > ").strip().lower()
         if choice in {"q", "quit"}:
             raise _UserQuit()
         if choice in {"s", "skip", ""}:
@@ -218,6 +237,40 @@ def decide_with_auto_or_menu(
                 sp.search, q=query, type="track", market=(market or "FR"), limit=20
             )
             items = (resp or {}).get("tracks", {}).get("items", [])
+            cands = [_cand_from_item(it) for it in items]
+            for c in cands:
+                c.score = score_candidate(lt, c)
+            cands.sort(key=lambda c: c.score, reverse=True)
+            _print_candidates(cands, max_to_show=max_candidates)
+            continue
+        if choice in {"a", "autre"}:
+            if sp is None:
+                print("Requête 'autre' indisponible (client non fourni).")
+                continue
+            title = input("Titre (laisser vide si inconnu): ").strip()
+            artist = input("Artiste (laisser vide si inconnu): ").strip()
+            if not title and not artist:
+                print("Veuillez renseigner au moins un des champs (titre ou artiste).")
+                continue
+            queries: List[str] = []
+            if title and artist:
+                queries.append(f'track:"{title}" artist:"{artist}"')
+                queries.append(f"{title} {artist}")
+            elif title:
+                queries.append(f'track:"{title}"')
+                queries.append(title)
+            else:
+                queries.append(f'artist:"{artist}"')
+                queries.append(artist)
+
+            items = []
+            for q in queries:
+                resp = call_spotify_with_retries(
+                    sp.search, q=q, type="track", market=(market or "FR"), limit=20
+                )
+                items = (resp or {}).get("tracks", {}).get("items", [])
+                if items:
+                    break
             cands = [_cand_from_item(it) for it in items]
             for c in cands:
                 c.score = score_candidate(lt, c)
