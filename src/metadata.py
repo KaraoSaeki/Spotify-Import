@@ -59,7 +59,7 @@ def read_tags(path: Path) -> LocalTrack:
             pass
 
         tags = getattr(audio, "tags", None)
-        # Try easy-like
+        # Try easy-like and multiple tag formats
         try:
             title = (
                 (tags.get("title")[0] if isinstance(tags.get("title"), list) else tags.get("title"))
@@ -69,11 +69,16 @@ def read_tags(path: Path) -> LocalTrack:
         except Exception:
             pass
         try:
-            artist = (
-                (tags.get("artist")[0] if isinstance(tags.get("artist"), list) else tags.get("artist"))
-                if tags and tags.get("artist")
-                else None
-            )
+            # Try multiple artist tag formats (artist, TPE1, ©ART, etc.)
+            artist = None
+            for key in ("artist", "TPE1", "©ART", "ARTIST"):
+                if tags and tags.get(key):
+                    val = tags.get(key)
+                    artist = val[0] if isinstance(val, list) else val
+                    # Convert to string if it's a tag object
+                    if artist:
+                        artist = str(artist) if not isinstance(artist, str) else artist
+                        break
         except Exception:
             pass
         try:

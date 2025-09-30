@@ -39,10 +39,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--public", action="store_true")
     p.add_argument("--private", action="store_true")
     p.add_argument("--collab", action="store_true")
-    p.add_argument("--auto-accept", type=float, default=0.92)
+    p.add_argument("--auto-accept", type=float, default=0.92, help="Score minimum pour auto-accepter (défaut: 0.92)")
+    p.add_argument("--auto-deny", type=float, default=None, help="Score maximum pour auto-refuser (ex: 0.5 refuse tout score <= 0.5)")
     p.add_argument("--max-candidates", type=int, default=5)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--resume", type=str, default=None, help="Chemin vers state.json")
+    p.add_argument("--exclude", type=str, default=None, help="Mots-clés à exclure (séparés par des virgules, ex: 'AMV,RIRE JAUNE')")
     p.add_argument(
         "--extensions",
         type=str,
@@ -225,6 +227,20 @@ def main() -> None:
             Path(args.path_import), exts=exts, follow_symlinks=follow_symlinks, ignore_hidden=args.ignore_hidden, recursive=not args.no_recursive
         )
     )
+    
+    # Filter files based on --exclude parameter
+    if args.exclude:
+        exclude_keywords = [kw.strip().lower() for kw in args.exclude.split(',') if kw.strip()]
+        if exclude_keywords:
+            original_count = len(files)
+            files = [
+                f for f in files
+                if not any(keyword in f.name.lower() for keyword in exclude_keywords)
+            ]
+            excluded_count = original_count - len(files)
+            if excluded_count:
+                console.print(f"[yellow]Exclusion: {excluded_count} fichiers ignorés (mots-clés: {', '.join(exclude_keywords)})[/yellow]")
+    
     console.print(f"Scan des fichiers…  {len(files)} trouvés")
     # If resuming, show how many will be skipped
     try:
@@ -249,33 +265,16 @@ def main() -> None:
             lt = read_tags(path)
             lt = infer_from_filename(path, lt)
 
-            # Build cache key on normalized title/artist
-            key = (strip_suffixes(lt.title or "").lower().strip(), remove_feat(lt.artist or "").lower().strip())
-            if key in search_cache:
-                cands = search_cache[key]
-                # Re-score for this local track context
-                for c in cands:
-                    c.score = score_candidate(lt, c)
-                cands = sorted(cands, key=lambda c: c.score, reverse=True)
-            else:
-                cands = search_candidates(sp, lt, args.market, limit=20)
-                search_cache[key] = cands[:]
-            best_uri = None
-            best_score = None
-            if cands:
-                best_uri = cands[0].uri
-                best_score = cands[0].score
-
-            # Advanced enhancement from filename (e.g., anime OP/ED mapping) if score is low
-            if (
-                args.advanced_search == "anime"
-                and (best_score is None or best_score < max(0.7, float(args.auto_accept) - 0.1))
-            ):
+            # Try advanced anime search FIRST if enabled (before normal search)
+            anime_enhanced = False
+            if args.advanced_search == "anime":
                 try:
                     improved = enhance_from_filename_anime(path)
                     if improved and (improved.get("title") or improved.get("artist")):
-                        # Build a transient LocalTrack-like context
-                        lt2 = LocalTrack(
+                        logger.info(f"Anime metadata found: {improved.get('title')} by {improved.get('artist')}")
+                        # Build a transient LocalTrack-like context with improved metadata
+                        lt = LocalTrack(
+                            path=lt.path,
                             title=improved.get("title") or lt.title,
                             artist=improved.get("artist") or lt.artist,
                             album=lt.album,
@@ -284,17 +283,29 @@ def main() -> None:
                             isrc=lt.isrc,
                             tracknumber=lt.tracknumber,
                         )
-                        c2 = search_candidates(sp, lt2, args.market, limit=20)
-                        if c2:
-                            for c in c2:
-                                c.score = score_candidate(lt, c)
-                            c2 = sorted(c2, key=lambda c: c.score, reverse=True)
-                            if not cands or c2[0].score > (best_score or 0):
-                                cands = c2
-                                best_uri = cands[0].uri
-                                best_score = cands[0].score
-                except Exception:
-                    pass
+                        anime_enhanced = True
+                except Exception as e:
+                    logger.debug(f"Anime search failed: {e}")
+
+            # Build cache key on normalized title/artist
+            key = (strip_suffixes(lt.title or "").lower().strip(), remove_feat(lt.artist or "").lower().strip())
+            if key in search_cache and not anime_enhanced:
+                # Use cache only if we didn't enhance with anime data
+                cands = search_cache[key]
+                # Re-score for this local track context
+                for c in cands:
+                    c.score = score_candidate(lt, c)
+                cands = sorted(cands, key=lambda c: c.score, reverse=True)
+            else:
+                cands = search_candidates(sp, lt, args.market, limit=20)
+                if not anime_enhanced:
+                    search_cache[key] = cands[:]
+            
+            best_uri = None
+            best_score = None
+            if cands:
+                best_uri = cands[0].uri
+                best_score = cands[0].score
             # If under auto-accept, show interactive
             try:
                 best_uri = decide_with_auto_or_menu(
@@ -306,6 +317,7 @@ def main() -> None:
                     market=args.market,
                     max_candidates=max(1, min(5, int(args.max_candidates))),
                     local_path=str(path),
+                    auto_deny=float(args.auto_deny) if args.auto_deny is not None else None,
                 )
                 if best_uri and cands:
                     for c in cands:

@@ -106,7 +106,10 @@ def _cand_from_item(item) -> Candidate:
 
 
 def search_candidates(sp, lt: LocalTrack, market: str, limit: int) -> List[Candidate]:
-    """Search Spotify for candidates using a strategy of queries, then score locally."""
+    """Search Spotify for candidates using a strategy of queries, then score locally.
+    
+    Tries multiple markets (primary, JP, US, global) to find tracks not available in all regions.
+    """
     queries: List[str] = []
     if lt.isrc:
         queries.append(f"isrc:{lt.isrc}")
@@ -115,8 +118,13 @@ def search_candidates(sp, lt: LocalTrack, market: str, limit: int) -> List[Candi
     artist = remove_feat(lt.artist or "")
 
     if title and artist:
+        # Strategy 1: Structured queries with quotes (most precise)
         queries.append(f'track:"{title}" artist:"{artist}"')
+        # Strategy 2: Simple combined search (like Spotify UI - often most effective)
         queries.append(f"{title} {artist}")
+        # Strategy 3: Without quotes for more flexibility
+        queries.append(f"track:{title} artist:{artist}")
+        # Strategy 4: Cleaned versions
         queries.append(f"{strip_suffixes(title)} {artist}")
         queries.append(f"{remove_feat(title)} {remove_feat(artist)}")
     elif title:
@@ -127,17 +135,30 @@ def search_candidates(sp, lt: LocalTrack, market: str, limit: int) -> List[Candi
 
     seen_ids = set()
     items = []
+    
+    # Try multiple markets: primary market, then JP (for anime), US, and global
+    # This is crucial for finding region-locked content (e.g., Japanese anime songs)
+    markets_to_try = [market]
+    if market != "JP":
+        markets_to_try.append("JP")
+    if market not in ["US", "JP"]:
+        markets_to_try.append("US")
+    if market is not None:
+        markets_to_try.append(None)  # Global search
 
-    for q in queries:
-        resp = call_spotify_with_retries(sp.search, q=q, type="track", market=market, limit=20)
-        tracks = (resp or {}).get("tracks", {})
-        for it in tracks.get("items", []):
-            tid = it.get("id")
-            if not tid or tid in seen_ids:
-                continue
-            seen_ids.add(tid)
-            items.append(it)
-        if len(items) >= 20:
+    for current_market in markets_to_try:
+        for q in queries:
+            resp = call_spotify_with_retries(sp.search, q=q, type="track", market=current_market, limit=20)
+            tracks = (resp or {}).get("tracks", {})
+            for it in tracks.get("items", []):
+                tid = it.get("id")
+                if not tid or tid in seen_ids:
+                    continue
+                seen_ids.add(tid)
+                items.append(it)
+            if len(items) >= 50:  # Stop if we have enough candidates
+                break
+        if len(items) >= 50:
             break
 
     cands = [_cand_from_item(it) for it in items]
@@ -186,16 +207,25 @@ def decide_with_auto_or_menu(
     market: Optional[str] = None,
     max_candidates: int = 5,
     local_path: Optional[str] = None,
+    auto_deny: Optional[float] = None,
 ) -> Optional[str]:
     """Return URI if accepted, else None. If dry_run, still return best URI but caller should avoid adding.
 
-    If top candidate score >= auto_accept, auto-accept; otherwise show up to 5 and prompt.
+    If top candidate score >= auto_accept, auto-accept.
+    If auto_deny is set and score <= auto_deny, auto-reject.
+    Otherwise show up to 5 and prompt.
     Choices: [1-5] select, [s]kip, [m]anual, [q]uit
     """
     max_candidates = min(max_candidates, 5)
     best = cands[0] if cands else None
+    
+    # Auto-accept if score is high enough
     if best and best.score >= auto_accept:
         return best.uri
+    
+    # Auto-deny if score is too low
+    if auto_deny is not None and best and best.score <= auto_deny:
+        return None
 
     # Interactive menu
     if not cands:
@@ -220,12 +250,44 @@ def decide_with_auto_or_menu(
         pass
 
     _print_candidates(cands, max_to_show=max_candidates)
+    
+    # Track current market for dynamic changes
+    current_market = market
+    
     while True:
-        choice = input("[s]kip, [m]anual, [a]utre (titre/artiste), [1-5], [q]uit > ").strip().lower()
+        # Show current market in prompt
+        market_display = f" [market: {current_market or 'FR'}]" if current_market else ""
+        choice = input(f"[s]kip, [m]anual, [a]utre (titre/artiste), [l]ien spotify, [c]hange market{market_display}, [1-5], [q]uit > ").strip().lower()
         if choice in {"q", "quit"}:
             raise _UserQuit()
         if choice in {"s", "skip", ""}:
             return None
+        if choice in {"l", "link", "lien", "url"}:
+            # Direct Spotify link input
+            link = input("Collez le lien Spotify (ex: https://open.spotify.com/track/...): ").strip()
+            if not link:
+                continue
+            # Extract track ID from various Spotify URL formats
+            import re
+            # Patterns: https://open.spotify.com/track/ID or spotify:track:ID
+            match = re.search(r'(?:track[/:]|tracks/)([a-zA-Z0-9]+)', link)
+            if match:
+                track_id = match.group(1)
+                track_uri = f"spotify:track:{track_id}"
+                print(f"✓ URI extrait: {track_uri}")
+                return track_uri
+            else:
+                print("❌ Lien invalide. Format attendu: https://open.spotify.com/track/ID")
+                continue
+        if choice in {"c", "change", "market"}:
+            # Change market dynamically
+            print(f"Marché actuel: {current_market or 'FR'}")
+            print("Marchés disponibles: FR, JP, US, GB, DE, ES, IT, etc.")
+            new_market = input("Nouveau marché (ou vide pour annuler): ").strip().upper()
+            if new_market:
+                current_market = new_market
+                print(f"✓ Marché changé en: {current_market}")
+            continue
         if choice in {"m", "manual"}:
             if sp is None:
                 print("Requête manuelle indisponible (client non fourni).")
@@ -233,10 +295,28 @@ def decide_with_auto_or_menu(
             query = input("Saisir une requête manuelle: ").strip()
             if not query:
                 continue
-            resp = call_spotify_with_retries(
-                sp.search, q=query, type="track", market=(market or "FR"), limit=20
-            )
-            items = (resp or {}).get("tracks", {}).get("items", [])
+            
+            # Try multiple markets for manual search too
+            markets_to_try = [current_market or "FR"]
+            if (current_market or "FR") != "JP":
+                markets_to_try.append("JP")
+            if (current_market or "FR") not in ["US", "JP"]:
+                markets_to_try.append("US")
+            
+            seen_ids = set()
+            items = []
+            for m in markets_to_try:
+                resp = call_spotify_with_retries(
+                    sp.search, q=query, type="track", market=m, limit=20
+                )
+                for it in (resp or {}).get("tracks", {}).get("items", []):
+                    tid = it.get("id")
+                    if tid and tid not in seen_ids:
+                        seen_ids.add(tid)
+                        items.append(it)
+                if len(items) >= 50:
+                    break
+            
             cands = [_cand_from_item(it) for it in items]
             for c in cands:
                 c.score = score_candidate(lt, c)
@@ -249,28 +329,58 @@ def decide_with_auto_or_menu(
                 continue
             title = input("Titre (laisser vide si inconnu): ").strip()
             artist = input("Artiste (laisser vide si inconnu): ").strip()
+            # Ask for market override
+            market_input = input(f"Marché (vide = {current_market or 'FR'}, ex: JP, US, FR): ").strip().upper()
+            search_market = market_input if market_input else current_market
             if not title and not artist:
                 print("Veuillez renseigner au moins un des champs (titre ou artiste).")
                 continue
+            
+            # Build multiple search strategies
             queries: List[str] = []
             if title and artist:
+                # Most effective: simple combined search (like Spotify UI)
+                queries.append(f"{title} {artist}")
+                # Structured with quotes
                 queries.append(f'track:"{title}" artist:"{artist}"')
+                # Structured without quotes (more flexible)
+                queries.append(f"track:{title} artist:{artist}")
+                # Just the terms
                 queries.append(f"{title} {artist}")
             elif title:
-                queries.append(f'track:"{title}"')
                 queries.append(title)
+                queries.append(f'track:"{title}"')
+                queries.append(f"track:{title}")
             else:
-                queries.append(f'artist:"{artist}"')
                 queries.append(artist)
+                queries.append(f'artist:"{artist}"')
+                queries.append(f"artist:{artist}")
 
+            # Collect results from all strategies and multiple markets
+            markets_to_try = [search_market or "FR"]
+            if (search_market or "FR") != "JP":
+                markets_to_try.append("JP")
+            if (search_market or "FR") not in ["US", "JP"]:
+                markets_to_try.append("US")
+            
+            seen_ids = set()
             items = []
-            for q in queries:
-                resp = call_spotify_with_retries(
-                    sp.search, q=q, type="track", market=(market or "FR"), limit=20
-                )
-                items = (resp or {}).get("tracks", {}).get("items", [])
-                if items:
+            for m in markets_to_try:
+                for q in queries:
+                    resp = call_spotify_with_retries(
+                        sp.search, q=q, type="track", market=m, limit=20
+                    )
+                    for it in (resp or {}).get("tracks", {}).get("items", []):
+                        tid = it.get("id")
+                        if tid and tid not in seen_ids:
+                            seen_ids.add(tid)
+                            items.append(it)
+                    # Stop if we have enough results
+                    if len(items) >= 50:
+                        break
+                if len(items) >= 50:
                     break
+            
             cands = [_cand_from_item(it) for it in items]
             for c in cands:
                 c.score = score_candidate(lt, c)
