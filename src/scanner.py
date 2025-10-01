@@ -19,15 +19,18 @@ def iter_audio_files(
     follow_symlinks: bool,
     ignore_hidden: bool,
     recursive: bool = True,
+    exclude_dirs: Sequence[str] = None,
 ) -> Iterator[Path]:
     """Yield Path des fichiers audio valides.
 
     - root: dossier racine
     - exts: extensions autorisées, sans point (ex: ["mp3", "flac"]).
     - recursive: si False, ne pas descendre dans les sous-dossiers.
+    - exclude_dirs: noms de dossiers à exclure (ex: ["AMV", "Covers"]).
     """
     root_path = Path(root)
     allowed = {e.lower().lstrip(".") for e in exts}
+    excluded_dirs = {d.lower() for d in (exclude_dirs or [])}
 
     if not recursive:
         dpath = root_path
@@ -55,6 +58,9 @@ def iter_audio_files(
         # Optionally skip hidden subdirs
         if ignore_hidden:
             dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        # Skip excluded directories
+        if excluded_dirs:
+            dirnames[:] = [d for d in dirnames if d.lower() not in excluded_dirs]
         for fn in filenames:
             p = dpath / fn
             if ignore_hidden and _is_hidden(p):

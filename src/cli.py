@@ -44,7 +44,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-candidates", type=int, default=5)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--resume", type=str, default=None, help="Chemin vers state.json")
-    p.add_argument("--exclude", type=str, default=None, help="Mots-clés à exclure (séparés par des virgules, ex: 'AMV,RIRE JAUNE')")
+    p.add_argument("--exclude", type=str, default=None, help="Mots-clés à exclure des fichiers (séparés par des virgules, ex: 'AMV,RIRE JAUNE')")
+    p.add_argument("--exclude-dirs", type=str, default=None, help="Dossiers à exclure du scan récursif (séparés par des virgules, ex: 'AMV,Covers,Live')")
     p.add_argument(
         "--extensions",
         type=str,
@@ -101,10 +102,23 @@ def prompt_new_playlist_meta(args) -> dict:
     return {"name": name, "public": public, "collaborative": collab, "description": description}
 
 
-def decide_status(best_uri: Optional[str], existing: Set[str], dry_run: bool) -> str:
+def decide_status(best_uri: Optional[str], existing: Set[str], dry_run: bool, ask_on_duplicate: bool = False, track_info: str = None) -> str:
     if not best_uri:
         return NOT_FOUND
     if best_uri in existing:
+        if ask_on_duplicate:
+            # Ask user if they want to add duplicate
+            print(f"\n⚠️  DOUBLON DÉTECTÉ")
+            if track_info:
+                print(f"   Titre: {track_info}")
+            print(f"   URI: {best_uri}")
+            print(f"   Ce titre est déjà présent dans la playlist.")
+            choice = input("\nAjouter quand même ce doublon ? [y]es / [n]o (défaut=non) > ").strip().lower()
+            if choice in {"y", "yes", "o", "oui"}:
+                print("✓ Doublon ajouté")
+                return PLANNED_ADD if dry_run else ADDED
+            else:
+                print("✗ Doublon ignoré")
         return DUPLICATE
     return PLANNED_ADD if dry_run else ADDED
 
@@ -222,9 +236,21 @@ def main() -> None:
     state = _load_resume(args.resume)
     processed_norm = { _norm_key(k) for k in state.get("processed", {}).keys() }
 
+    # Parse excluded directories
+    exclude_dirs_list = []
+    if args.exclude_dirs:
+        exclude_dirs_list = [d.strip() for d in args.exclude_dirs.split(',') if d.strip()]
+        if exclude_dirs_list:
+            console.print(f"[yellow]Exclusion de dossiers: {', '.join(exclude_dirs_list)}[/yellow]")
+    
     files = list(
         iter_audio_files(
-            Path(args.path_import), exts=exts, follow_symlinks=follow_symlinks, ignore_hidden=args.ignore_hidden, recursive=not args.no_recursive
+            Path(args.path_import), 
+            exts=exts, 
+            follow_symlinks=follow_symlinks, 
+            ignore_hidden=args.ignore_hidden, 
+            recursive=not args.no_recursive,
+            exclude_dirs=exclude_dirs_list
         )
     )
     
@@ -319,10 +345,13 @@ def main() -> None:
                     local_path=str(path),
                     auto_deny=float(args.auto_deny) if args.auto_deny is not None else None,
                 )
+                # Find track info for duplicate detection
+                track_info = None
                 if best_uri and cands:
                     for c in cands:
                         if c.uri == best_uri:
                             best_score = c.score
+                            track_info = f'"{c.name}" — {", ".join(c.artists)}'
                             break
             except _UserQuit:
                 logger.info("Arrêt demandé par l'utilisateur. Sauvegarde de l'état.")
@@ -330,7 +359,7 @@ def main() -> None:
                 _save_resume(args.resume, state)
                 return
 
-            status = decide_status(best_uri, existing, args.dry_run)
+            status = decide_status(best_uri, existing, args.dry_run, ask_on_duplicate=True, track_info=track_info)
             # Append path to per-status list file (once)
             try:
                 if status in status_fhs:
